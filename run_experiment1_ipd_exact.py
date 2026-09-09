@@ -42,8 +42,17 @@ def train_pairing(agent1_type, agent2_type, gamma, delta, eta, iterations, seed)
 
     reward_history1 = []
     reward_history2 = []
+    # P(C|s0) trajectory only (not the full 5-probability policy) -- this is
+    # just the opening-move probability, a cheap proxy for "does this agent
+    # start out cooperative", not a full summary of its converged strategy
+    # (that also depends on p_cc/p_cd/p_dc/p_dd, e.g. is_tft_like() above).
+    # Small enough to log every iteration without bloating results.json.
+    p_s0_history1 = []
+    p_s0_history2 = []
     for _ in range(iterations):
-        v1, v2 = exact_values(torch.sigmoid(theta1), torch.sigmoid(theta2), IPD, gamma)
+        probs1 = torch.sigmoid(theta1)
+        probs2 = torch.sigmoid(theta2)
+        v1, v2 = exact_values(probs1, probs2, IPD, gamma)
 
         if agent1_type == "LOLA":
             u1 = lola_update(v1, v2, theta1, theta2, delta, eta)
@@ -55,6 +64,9 @@ def train_pairing(agent1_type, agent2_type, gamma, delta, eta, iterations, seed)
         else:
             u2 = naive_update(v2, theta2, delta)
 
+        p_s0_history1.append(probs1[0].detach().item())
+        p_s0_history2.append(probs2[0].detach().item())
+
         with torch.no_grad():
             theta1 += u1
             theta2 += u2
@@ -65,6 +77,12 @@ def train_pairing(agent1_type, agent2_type, gamma, delta, eta, iterations, seed)
 
     final_probs1 = torch.sigmoid(theta1).detach().tolist()
     final_probs2 = torch.sigmoid(theta2).detach().tolist()
+    # Close the trajectory with the actual trained endpoint: the loop above
+    # only records each agent's P(C|s0) *before* that iteration's update, so
+    # without this the last recorded point would be one update stale relative
+    # to final_probs1/2.
+    p_s0_history1.append(final_probs1[0])
+    p_s0_history2.append(final_probs2[0])
     return {
         "final_probs1": final_probs1,
         "final_probs2": final_probs2,
@@ -72,6 +90,8 @@ def train_pairing(agent1_type, agent2_type, gamma, delta, eta, iterations, seed)
         "final_avg_reward2": reward_history2[-1],
         "reward_history1": reward_history1,
         "reward_history2": reward_history2,
+        "p_s0_history1": p_s0_history1,
+        "p_s0_history2": p_s0_history2,
     }
 
 
@@ -107,6 +127,8 @@ def summarize(agent1_type, agent2_type, gamma, delta, eta, iterations, num_runs,
         "example_final_probs2": example_run["final_probs2"],
         "example_reward_history1": example_run["reward_history1"],
         "example_reward_history2": example_run["reward_history2"],
+        "example_p_s0_history1": example_run["p_s0_history1"],
+        "example_p_s0_history2": example_run["p_s0_history2"],
     }
 
 
@@ -193,6 +215,44 @@ def main():
         plot_path = os.path.join(args.output_dir, "reward_curves.png")
         fig.savefig(plot_path, dpi=120)
         print(f"Wrote {plot_path}")
+
+        # Policy-space phase portrait: each agent's P(C|s0) -- the opening-
+        # move probability only, not the full 5-probability policy -- over
+        # training, plotted against each other for one example run per
+        # pairing. This repo's own visualization loosely illustrating the
+        # paper's headline claim (Fig. 1's qualitative story), not a
+        # reproduction of a specific paper figure, and not a substitute for
+        # the %TFT-like/mean-reward numbers reported elsewhere: a trajectory
+        # can approach a corner here while still defecting (or cooperating)
+        # after the opening move, since that depends on p_cc/p_cd/p_dc/p_dd
+        # too (see is_tft_like() above).
+        fig2, ax2 = plt.subplots(figsize=(6.5, 6))
+        colors = {"NL-NL": "tab:red", "LOLA-NL": "tab:orange", "NL-LOLA": "tab:blue", "LOLA-LOLA": "tab:green"}
+        for agent1_type, agent2_type in PAIRINGS:
+            key = f"{agent1_type}-{agent2_type}"
+            summary = results[key]
+            x = summary["example_p_s0_history1"]
+            y = summary["example_p_s0_history2"]
+            color = colors[key]
+            ax2.plot(x, y, color=color, alpha=0.8, linewidth=1.5, label=key)
+            ax2.plot(x[0], y[0], marker="o", color=color, markerfacecolor="none", markersize=8)
+            ax2.plot(x[-1], y[-1], marker="*", color=color, markersize=14)
+        ax2.set_xlim(-0.02, 1.02)
+        ax2.set_ylim(-0.02, 1.02)
+        ax2.set_xlabel("agent1 P(C|s0)")
+        ax2.set_ylabel("agent2 P(C|s0)")
+        ax2.set_title(
+            "IPD exact-gradient opening-move trajectories\n"
+            "one example run per pairing (circle = start, star = end)",
+            fontsize=10,
+        )
+        ax2.annotate("both open D", (0.02, 0.02), fontsize=8, color="gray")
+        ax2.annotate("both open C", (0.98, 0.98), ha="right", va="top", fontsize=8, color="gray")
+        ax2.legend(fontsize=8, loc="center left", bbox_to_anchor=(1.0, 0.5))
+        fig2.tight_layout(rect=(0, 0, 1, 0.94))
+        phase_plot_path = os.path.join(args.output_dir, "phase_portrait.png")
+        fig2.savefig(phase_plot_path, dpi=120)
+        print(f"Wrote {phase_plot_path}")
     except ImportError:
         print("matplotlib not available, skipping plot.")
 

@@ -169,7 +169,7 @@ python run_experiment3_imp.py                                # smoke test (5 see
 python run_experiment3_imp.py --num-runs 50 --iterations 400 # this README's numbers
 ```
 
-Each writes `results.json` (raw per-pairing numbers and one example run's full training curve) to `output/<script-name>/`; `run_experiment1_ipd_exact.py` also saves a reward-curve plot if matplotlib is available.
+Each writes `results.json` (raw per-pairing numbers and one example run's full training curve) to `output/<script-name>/`; `run_experiment1_ipd_exact.py` also saves two plots if matplotlib is available: `reward_curves.png` (mean reward/step vs. iteration, one panel per pairing) and `phase_portrait.png` (agent1's vs. agent2's $P(C \mid s_0)$ — the opening-move probability only, not the full 5-probability policy — over training, one example run per pairing on shared axes; this repo's own visualization, not a reproduction of the paper's own Fig. 1, and not a substitute for the %TFT-like/mean-reward numbers reported above since opening-move behavior alone doesn't determine whether an agent reciprocates).
 
 ## Tests
 
