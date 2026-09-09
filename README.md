@@ -20,10 +20,19 @@ Foerster et al. model an iterated matrix game as a two-agent Markov Reward Proce
 
 The payoff matrices used are the paper's own Table 1 (IPD) and Table 2 (IMP), transcribed exactly in `foerster2018/games/matrix_game.py`:
 
-|       | C       | D      |            |       | Head    | Tail    |
-|-------|---------|--------|            |-------|---------|---------|
-| **C** | (-1,-1) | (-3,0) |            | **H** | (+1,-1) | (-1,+1) |
-| **D** | (0,-3)  | (-2,-2)|            | **T** | (-1,+1) | (+1,-1) |
+**IPD (Table 1)**
+
+|       | C       | D       |
+|-------|---------|---------|
+| **C** | (-1,-1) | (-3,0)  |
+| **D** | (0,-3)  | (-2,-2) |
+
+**IMP (Table 2)**
+
+|       | Head    | Tail    |
+|-------|---------|---------|
+| **H** | (+1,-1) | (-1,+1) |
+| **T** | (-1,+1) | (+1,-1) |
 
 (IPD note: this is a "cost" convention where all four payoffs are <= 0 and higher/less-negative is better — mutual cooperation averages -1/step, mutual defection -2/step, matching the paper's own text: "the average returns per step in self-play are -1 and -2 for TFT and DD respectively.")
 
