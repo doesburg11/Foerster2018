@@ -1,0 +1,171 @@
+# Learning with Opponent-Learning Awareness — Foerster et al. (2018)
+
+> **This is a from-scratch paper reproduction, not a ported codebase.** This repo rebuilds Foerster et al. (2018)'s exact-gradient and policy-gradient LOLA experiments directly from the paper's Section 4 equations, with its own PyTorch autograd implementation and no dependency on the [authors' own code](https://github.com/alshedivat/lola). Sibling repos in this series ([Leibo2017](https://github.com/doesburg11/Leibo2017), [Hughes2018](https://github.com/doesburg11/Hughes2018)) follow the same house style: brutally honest about what's matched, simplified, or doesn't reproduce.
+
+> **Scope: iterated matrix games only.** This repo implements Section 5.1's Iterated Prisoners' Dilemma (IPD) and Iterated Matching Pennies (IMP) experiments, both with exact gradients (Section 4.1/4.2) and with policy-gradient/REINFORCE estimates (Section 4.3). It does **not** implement the Coin Game (Section 5.2, deep recurrent policies), LOLA-DiCE (a separate, later paper), or LOLA with opponent modelling of an unknown opponent's parameters (Section 4.4). See "Known gaps from the paper" below.
+
+> **Headline result: IMP reproduces the paper's claim cleanly; IPD reproduces the qualitative story but not the paper's exact numbers (which is expected — the paper doesn't publish the step sizes this repo would need to match them exactly).** NL-vs-NL converges to mutual defection, LOLA-vs-LOLA converges toward mutual cooperation, and LOLA exploits NL when paired against it — all under exact gradients, matching Fig. 1's qualitative claims. On IMP, LOLA converges to the Nash equilibrium with near-zero variance while NL cycles with high variance, closely matching Table 3's own reported standard deviations. The **policy-gradient (LOLA-PG) version is noisier and its asymmetric LOLA-vs-NL pairing does not reliably reproduce the exact-gradient exploitation result** — see "Known gaps" for real numbers and discussion, not a hidden problem.
+
+A from-scratch replication of:
+
+> Foerster, J., Chen, R. Y., Al-Shedivat, M., Whiteson, S., Abbeel, P., & Mordatch, I. (2018). *Learning with Opponent-Learning Awareness.* Proceedings of the 17th International Conference on Autonomous Agents and MultiAgent Systems (AAMAS 2018), 122-130. arXiv:1709.04326.
+
+The paper's question: in multi-agent reinforcement learning, each agent's environment is non-stationary because the other agents are also learning. A "naive learner" (NL) treats the other agents as a fixed part of the environment and does plain gradient ascent on its own expected return — in the iterated prisoners' dilemma, this reliably converges to mutual defection even though mutual cooperation is available and better for both. LOLA (Learning with Opponent-Learning Awareness) instead has each agent explicitly account for the fact that the other agent is also about to take a gradient step, and differentiates its own expected return *through* that anticipated update — a genuinely second-order method, since it requires the gradient of a gradient. The paper shows this single extra term is enough for two LOLA agents to discover reciprocity (tit-for-tat-like cooperation) in the IPD purely out of self-interest, with no communication and no built-in notion of fairness.
+
+## The mechanism
+
+### Games: memory-one iterated matrix games (Sec. 5.1)
+
+Foerster et al. model an iterated matrix game as a two-agent Markov Reward Process: "the state at time 0 is empty, denoted as s0, and at time t >= 1 is the joint action from t-1: s_t = (u1_{t-1}, u2_{t-1})." Because a memory-1 strategy loses no generality against a memory-1 opponent (Press & Dyson 2012, cited by the paper), each agent's policy is "fully specified by 5 probabilities": the probability of playing its first action (Cooperate for IPD, Heads for IMP) at the start state s0, and in each of the four states CC, CD, DC, DD. Each probability is a sigmoid-squashed scalar logit (`foerster2018/policy.py::MemoryOnePolicy`).
+
+The payoff matrices used are the paper's own Table 1 (IPD) and Table 2 (IMP), transcribed exactly in `foerster2018/games/matrix_game.py`:
+
+|       | C       | D      |            |       | Head    | Tail    |
+|-------|---------|--------|            |-------|---------|---------|
+| **C** | (-1,-1) | (-3,0) |            | **H** | (+1,-1) | (-1,+1) |
+| **D** | (0,-3)  | (-2,-2)|            | **T** | (-1,+1) | (+1,-1) |
+
+(IPD note: this is a "cost" convention where all four payoffs are <= 0 and higher/less-negative is better — mutual cooperation averages -1/step, mutual defection -2/step, matching the paper's own text: "the average returns per step in self-play are -1 and -2 for TFT and DD respectively.")
+
+### Exact value function (Sec. 5.1, `foerster2018/exact/value.py`)
+
+The paper states it solves the multi-agent MDP analytically but doesn't spell out the matrix algebra in the main text; the derivation used here is the standard stationary-Markov-chain construction for memory-one repeated games (the method Press & Dyson's zero-determinant-strategy literature, cited by the paper, is built on). Writing `w1` for the initial distribution over the four joint-outcome states (derived from both agents' s0-probabilities) and `M` for the 4x4 transition matrix (derived from both agents' per-state probabilities), the exact discounted value for one agent is:
+
+```
+V = w1 . (I - gamma * M)^-1 . r
+```
+
+where `r` is that agent's length-4 payoff vector. This is implemented with `torch.linalg.solve` (not an explicit matrix inverse), keeping the whole computation a plain, twice-differentiable function of both agents' policy parameters — see `foerster2018/exact/value.py`'s module docstring for the full derivation. `tests/test_value_function.py` checks it against three hand-computable degenerate cases (always-cooperate, always-defect, TFT-vs-always-cooperate) and a zero-sum sanity check on IMP.
+
+### Exact LOLA (Sec. 4.1/4.2, `foerster2018/exact/lola.py`)
+
+Naive Learner (Eq. 4.1): `theta_{i+1} = theta_i + delta * grad_theta V(theta_i)` — plain gradient ascent on the agent's own exact value.
+
+LOLA (Eq. 4.2-4.4): a LOLA agent optimises its return under a **one-step lookahead of the opponent's own naive learning step**. Substituting the opponent's naive update (`delta_theta2 = eta * grad_theta2 V2`) into a first-order Taylor expansion of `V1(theta1, theta2 + delta_theta2)` and differentiating w.r.t. theta1 gives:
+
+```
+f_lola^1 = delta * grad_theta1 V1(theta1, theta2)
+         + delta * eta * (grad_theta2 V1(theta1, theta2))^T . grad_theta1 grad_theta2 V2(theta1, theta2)
+```
+
+The second term is the whole point of LOLA: `grad_theta1 grad_theta2 V2` differentiates *through the opponent's own gradient*, not just through V1 — a genuine second-order (mixed-Hessian) quantity. As instructed, this is **not hand-derived**; it's computed with two calls to `torch.autograd.grad(..., create_graph=True)` (to get `grad_theta2 V1` and `grad_theta2 V2` as differentiable functions of theta1) followed by the standard "dot-product-then-differentiate" trick, which recovers the exact Hessian-vector product without ever materialising a Hessian matrix. The paper is explicit that "the dependency of `grad_theta2 V1(theta1, theta2)` on theta1 is dropped during the backward pass" — a deliberate simplification stated in the paper itself, implemented here as one `.detach()` call (`lola.py`'s `lola_correction`). **This exact implementation was independently reviewed by Codex** (see "Independent review" below) and confirmed to genuinely differentiate through the opponent's simulated gradient step, not collapse to a first-order update.
+
+### Policy-gradient LOLA (Sec. 4.3, `foerster2018/policy_gradient/`)
+
+When agents can't evaluate `V1`/`V2` and their gradients exactly (the realistic deep-RL setting), the paper derives score-function (REINFORCE) estimators of the same quantities from sampled rollouts. `foerster2018/policy_gradient/rollout.py` samples batched episodes; `foerster2018/policy_gradient/lola_pg.py` implements the paper's own Eq. 4.5 (naive PG update, reward-to-go with a per-timestep batch-mean baseline for variance reduction) and Eq. 4.6-4.7 (the PG estimator of the LOLA cross term and the resulting LOLA-PG update). Both are implemented as **explicit tensor arithmetic over the rollout's per-step score-function values**, not by building a surrogate loss and calling `loss.backward()` twice — see `lola_pg.py`'s module docstring for why that shortcut is a known trap here (a naive doubly-differentiated surrogate silently drops terms Eq. 4.6 requires; correctly handling this in general is the subject of the separate, out-of-scope LOLA-DiCE paper).
+
+A real bug was caught and fixed during development this way: the first-order estimator originally omitted an `gamma**t` factor the paper's own derivation requires (it's easy to miss because the reward-to-go term `R_t(tau)` already contains a *different*, relatively-discounted factor `gamma^{l-t}`). This inflated the naive gradient's magnitude by roughly 4x at `theta=0`, caught by directly comparing the PG estimator against the closed-form exact gradient at the same parameters (`tests/test_policy_gradient.py::test_reinforce_grad_matches_exact_gradient_at_uniform_policy`) — after the fix, the two agree to within Monte Carlo noise.
+
+## What's matched vs. simplified
+
+**Matched, from the paper's own stated design:**
+- The exact game definitions (Table 1 IPD, Table 2 IMP) and the memory-one, 5-probability policy parameterization (Sec. 5.1), transcribed and cross-checked directly against the primary source PDF, not from memory.
+- The exact value function's role in Sec. 4.1/4.2's NL and LOLA update rules, Eq. 4.1-4.4, including the paper's own explicit statement that the `grad_theta2 V1` dependency on theta1 is dropped in the LOLA correction term.
+- The policy-gradient estimators of Eq. 4.5-4.7, including the paper's stated reward-to-go-with-baseline construction for the first-order term and the un-baselined double-cumulative-score construction for the second-order (Eq. 4.6) term.
+- `gamma = 0.96` for IPD, `gamma = 0.9` for IMP (Sec. 5.3: "we found that a lower gamma produced more stable learning on IMP").
+- All four (NL, LOLA) x (NL, LOLA) pairings, as the paper's own Table 4 does for the exact-gradient case (Table 3 itself only reports the two symmetric self-play settings, NL-vs-NL and LOLA-vs-LOLA).
+
+**Simplified / not stated by the paper, filled in here (documented, not hidden):**
+- **Step sizes `delta`/`eta` for the exact-gradient experiment are not given in the paper's main text** (Sec. 5.3 only states a step size for the *policy-gradient* actor, 0.005, plus a separate critic step size of 1). This repo uses `delta = eta = 0.3` for the exact experiment, chosen empirically: `delta = 1.0` overshoots into a spurious full-cooperation fixed point even for mixed LOLA-vs-NL pairings within a few hundred iterations (an artifact of an oversized step, not a real dynamical result), while `delta <= 0.1` is too slow to escape the mutual-defection basin at all in a few hundred iterations. See `run_experiment1_ipd_exact.py --delta`'s help text and RESULTS.md for the sweep that produced this choice.
+- **The policy-gradient experiment's baseline is a simple per-timestep batch-mean baseline**, not the paper's own learned critic ("we train agents with an actor-critic method... a policy actor and -critic for variance reduction," Sec. 5.3). A batch-mean baseline is a valid, unbiased REINFORCE baseline but a weaker variance reducer than a learned critic, which likely explains why this repo's policy-gradient step sizes (also `delta = eta = 0.3`, `batch_size` in the hundreds-to-low-thousands) had to be tuned independently of the paper's own `delta = 0.005`/`batch_size = 4000` and don't reproduce the paper's exact numbers (see "Known gaps" below).
+- **The LOLA-PG cross term (Eq. 4.6) has no baseline/variance reduction at all**, matching the paper's own equation literally (it doesn't show one for this term either) but leaving it a comparatively high-variance estimator — this repo's own honest read of "the policy gradient finding is... noisier" (paper, Sec. 6.1).
+- **"%TFT-like" and "distance from Nash" are this repo's own operational metrics**, not quotes of the paper's exact classification rule (Table 3's "%TFT"/"%Nash" columns don't state their thresholds in the main text). `is_tft_like()` in the experiment scripts checks `P(C|s0) > 0.5 and P(C|CC) > 0.5 and P(C|DD) < 0.5`; IMP's "distance from Nash" is the mean absolute deviation of all 5 probabilities from 0.5. See "Known gaps" for where this heuristic visibly disagrees with a more careful reading (e.g. it can misclassify an exploited, mostly-cooperative NL agent as "TFT-like" even though it isn't reciprocating anything).
+- **Random uniform-ish initialization** (`theta ~ U(-0.1, 0.1)`, i.e. probabilities near 0.5) for every run, rather than whatever initialization scheme (if any) the paper used — not stated in the main text.
+
+## Known gaps from the paper
+
+All numbers below are from actual runs of this repo's own scripts (`output/run_experiment*/results.json`), not hypothetical. Commands to reproduce are in "Running it" below.
+
+**IMP (`run_experiment3_imp.py`) reproduces the paper's claims cleanly**, both qualitatively and quantitatively close on the one number that's directly comparable (Table 3's IMP standard deviation):
+
+| pairing | agent | mean reward/step | dist. from Nash | tail instability |
+|---|---|---|---|---|
+| NL vs NL | agent1 | -0.116 (std 0.395) | 0.469 | 0.0163 |
+| NL vs NL | agent2 | +0.116 (std 0.395) | 0.475 | 0.0193 |
+| LOLA vs LOLA | agent1 | ~0.000 (std 1.5e-8) | 2.9e-8 | 2.0e-8 |
+| LOLA vs LOLA | agent2 | ~0.000 (std 1.5e-8) | 2.3e-8 | 2.0e-8 |
+
+Paper's Table 3: NL-Ex R(std) = 0(0.37), LOLA-Ex R(std) = 0(0.02). This repo's NL-NL std (0.395) and LOLA-LOLA std (essentially 0) both land extremely close to the paper's own numbers, and the distance-from-Nash / tail-instability metrics confirm the qualitative story directly: NL-NL never gets close to the 50/50 Nash point (dist ~0.47) and keeps moving (tail instability two orders of magnitude above LOLA-LOLA's), while LOLA-LOLA converges essentially exactly to Nash and stays there. A genuinely strong reproduction, and the strongest quantitative match anywhere in this repo. LOLA-NL / NL-LOLA (mixed pairings, not tested by the paper's own Table 3 but included here for completeness) also converge close to Nash (dist ~0.013-0.014) — one LOLA agent alone is enough to pull both toward the equilibrium.
+
+**IPD, exact gradients (`run_experiment1_ipd_exact.py`, 50 runs, 600 iterations, delta=eta=0.3) reproduces the qualitative story but not the paper's exact magnitudes:**
+
+| pairing | agent | mean reward/step | %TFT-like |
+|---|---|---|---|
+| NL vs NL | both | -1.999 (std ~0) | 0% |
+| LOLA vs NL | LOLA | -0.736 (std 0.071) | 0% |
+| LOLA vs NL | NL | -1.940 (std 0.159) | 100% |
+| LOLA vs LOLA | agent1 | -1.130 (std 0.149) | 56% |
+| LOLA vs LOLA | agent2 | -1.122 (std 0.142) | 50% |
+
+Paper's Table 3: NL-Ex %TFT=20.8, R=-1.98(0.14); LOLA-Ex %TFT=81.0, R=-1.06(0.19).
+
+- **Mean rewards are close**: our NL-NL (-1.999) vs paper's -1.98, our LOLA-LOLA (~-1.13) vs paper's -1.06 — both within a reasonable margin, and LOLA-LOLA's spread (std ~0.15) is comparable to the paper's own (0.19).
+- **%TFT-like differs more**: this repo's NL-NL never gets classified as TFT-like (0%) vs the paper's 20.8%, and LOLA-LOLA is lower here (50-56%) than the paper's 81%. Two candidate explanations, both plausible and neither verified as *the* cause: (1) this repo's `is_tft_like()` heuristic is stricter/different from whatever the paper's own classifier does (not stated in the main text), and (2) this repo's narrow initialization (`theta ~ U(-0.1, 0.1)`, i.e. every run starts near indifferent-random) may make NL's convergence to defection more deterministic than the paper's own initialization scheme, which isn't stated either. **Also worth naming plainly: this repo's own NL-NL standard deviation (~3e-6) is far tighter than the paper's own reported 0.14** — i.e. every single one of our 50 seeds converges to essentially the exact same defection point, whereas the paper's own NL-Ex has real seed-to-seed spread. This is the single most likely sign of a real difference in either initialization distribution or termination criterion, not just a labelling difference in the %TFT metric.
+- **The LOLA-vs-NL asymmetry is qualitatively right but quantitatively bigger than the paper's own Table 4** (the paper's *only* published asymmetric-pairing numbers): Table 4's NL-Ex-vs-LOLA-Ex cell is `(-1.54, -1.28)` (NL gets -1.54, LOLA gets -1.28), i.e. a real but modest gap. This repo's own LOLA-vs-NL gives `(-0.736, -1.940)` (LOLA, NL) — LOLA does noticeably *better* and NL noticeably *worse* than the paper's own numbers. Same direction (LOLA exploits NL), bigger effect size. The most likely explanation is this repo's `delta=eta=0.3` (chosen empirically, since the paper doesn't state its own exact-experiment step size) simply being different from whatever the paper used — a real, acknowledged gap, not swept under the rug.
+
+**IPD, policy gradient (`run_experiment2_ipd_policy_gradient.py`, 5 runs, 300 iterations, batch=1024, horizon=100, delta=eta=0.3) reproduces LOLA-vs-LOLA reasonably but the mixed pairing does not reliably show LOLA exploiting NL:**
+
+| pairing | agent | mean reward/step | %TFT-like |
+|---|---|---|---|
+| NL vs NL | both | -1.999 | 0% |
+| LOLA vs NL | both | -1.999 | 0% |
+| NL vs LOLA | both | -1.800 (std 0.398) | 20% |
+| LOLA vs LOLA | agent1 | -1.234 (std 0.383) | 40% |
+| LOLA vs LOLA | agent2 | -1.260 (std 0.382) | 60% |
+
+Paper's Table 3: NL-PG %TFT=20.0, R=-1.98(0.00); LOLA-PG %TFT=66.4, R=-1.17(0.34).
+
+- **LOLA-LOLA is a genuinely good match**: -1.234/-1.260 here vs the paper's -1.17, with a comparable spread (0.38 here vs 0.34 in the paper).
+- **NL-NL matches almost exactly**: -1.999 here vs -1.98 in the paper.
+- **The mixed LOLA-vs-NL pairing does not show a reliable asymmetric-exploitation effect the way the exact-gradient version does.** `LOLA vs NL` (LOLA first) collapsed to mutual defection in all 5 seeds tested; `NL vs LOLA` (LOLA second, otherwise identical config) partially escaped defection in 1 of 5 seeds, dragging the mean to -1.8 with high variance. Since the paper's own Table 3 doesn't report a mixed-pairing PG result at all (only the two symmetric settings), this isn't a contradiction of a specific published number — but it is a real, honest limitation: this repo's simpler batch-mean-baseline REINFORCE estimator, at the step sizes and batch sizes tried here, is not reliably strong enough for a lone LOLA-PG agent to shape a naive PG learner into cooperating, unlike the exact-gradient case where this effect is clean and repeatable across all 50 seeds. Likely contributors, none isolated as *the* cause: too few iterations/seeds (5, vs. the paper's own larger and unstated PG budget), the batch-mean baseline being weaker than the paper's learned critic, and/or `delta=eta=0.3` not being well-tuned for this specific pairing (a value that works for LOLA-LOLA and NL-NL isn't guaranteed to work equally well for the asymmetric case). Not investigated further within this repo's scope.
+- Other explicitly out-of-scope items (decided before this repo was built, not discovered as gaps): the Coin Game (Sec. 5.2, deep recurrent policies over a spatial task), LOLA-DiCE (a separate follow-up paper), LOLA with opponent modelling of an unknown opponent's parameters (Sec. 4.4), higher-order LOLA (Sec. 4.5 / Table 4's "2nd-Order" column), and the round-robin tournament against other multi-agent algorithms (Sec. 6.1, Fig. 4).
+
+## Independent review
+
+Per this project's standing practice, `codex exec` (OpenAI Codex CLI) independently reviewed the exact-LOLA implementation for the specific failure mode this kind of second-order method is prone to: silently collapsing to a first-order update. Its verbatim conclusion:
+
+> No correctness bug found in `foerster2018/exact/`: the LOLA term does differentiate through the opponent's gradient step. It does not silently collapse to a first-order/naive update... The detach is deliberate and only removes the paper-dropped extra term involving `d/dtheta1(dV1/dtheta2)`... I also ran a direct probe: the implemented correction matched an independent Hessian-vector-product construction exactly at the tested point (`max_abs_impl_minus_manual = 0.0`).
+
+A second, supplementary Codex review was attempted on `foerster2018/policy_gradient/` (to independently check the gamma^t fix described above) but could not complete: the Codex CLI's configured default model (`gpt-5.5`) returned a `404 model does not exist` error from OpenAI's backend on every attempt (5 retries, across two separate sessions), and no other model name was accepted for this account. This is a third-party service issue, not something resolvable from this repo. The `policy_gradient/` module's correctness therefore rests on this repo's own verification instead of an independent AI review: the closed-form-vs-REINFORCE comparison that caught the original bug (`tests/test_policy_gradient.py::test_reinforce_grad_matches_exact_gradient_at_uniform_policy`), the score-function-vs-autograd checks, and the LOLA-PG-vs-exact-LOLA correlation check. See RESULTS.md for the full timeline.
+
+## Running it
+
+```bash
+git clone <this-repo>
+cd Foerster2018
+./create_conda_env.sh
+conda activate ./.conda
+# or: pip install -r requirements.txt into any Python 3.11 environment
+
+pytest tests/ -q
+```
+
+Every `run_experiment*.py` script defaults to a small/fast configuration (a smoke test of the full pipeline, seconds to a couple of minutes) and accepts flags to scale up to the runs reported above:
+
+```bash
+python run_experiment1_ipd_exact.py                                     # smoke test (5 seeds, 300 iters)
+python run_experiment1_ipd_exact.py --num-runs 50 --iterations 600      # this README's numbers
+
+python run_experiment2_ipd_policy_gradient.py                                              # smoke test
+python run_experiment2_ipd_policy_gradient.py --num-runs 5 --iterations 300 --batch-size 1024   # this README's numbers
+
+python run_experiment3_imp.py                                # smoke test (5 seeds, 200 iters)
+python run_experiment3_imp.py --num-runs 50 --iterations 400 # this README's numbers
+```
+
+Each writes `results.json` (raw per-pairing numbers and one example run's full training curve) to `output/<script-name>/`; `run_experiment1_ipd_exact.py` also saves a reward-curve plot if matplotlib is available.
+
+## Tests
+
+`tests/` covers, in dependency order: the exact value function (three hand-computable degenerate cases plus an IMP zero-sum sanity check, and a check that the value function supports the `create_graph=True` double backward LOLA needs), the exact LOLA correction term (reduces to the naive update at `eta=0`, is not just a rescaled copy of the naive gradient, genuinely depends on the opponent's own parameters, and — an actual training-scale check, not just a one-step check — that 200 iterations of exact NL-vs-NL self-play on the IPD collapses toward mutual defection), the policy-gradient score function (checked directly against `torch.autograd.grad` on the log-probability, both for cooperate and defect), the PG naive-gradient estimator (checked against the closed-form exact gradient at a shared parameter point — the same check that caught the `gamma**t` bug described above), the LOLA-PG correction's correlation with the exact LOLA correction at the same parameters, and end-to-end training smoke tests for all three experiment types. Run with `pytest tests/ -q` (19 tests, all passing).
+
+## Acknowledgments
+
+Developed with AI coding assistance from [Claude](https://claude.com/claude-code) (Anthropic), which does the implementation, with [Codex](https://openai.com/codex) (OpenAI) acting as an independent second opinion, peer-reviewing Claude's nontrivial code changes.
+
+## References
+
+- Foerster, J., Chen, R. Y., Al-Shedivat, M., Whiteson, S., Abbeel, P., & Mordatch, I. (2018). [Learning with Opponent-Learning Awareness](https://arxiv.org/abs/1709.04326). Proceedings of the 17th International Conference on Autonomous Agents and MultiAgent Systems (AAMAS 2018), 122-130.
+- Press, W. H., & Dyson, F. J. (2012). [Iterated Prisoner's Dilemma contains strategies that dominate any evolutionary opponent](https://doi.org/10.1073/pnas.1206569109). PNAS, 109(26), 10409-10413. (Zero-determinant strategies; cited by the paper for the memory-one-loses-no-generality result this repo's game formulation relies on.)
+- Lerer, A., & Peysakhovich, A. (2017). [Maintaining cooperation in complex social dilemmas using deep reinforcement learning](https://arxiv.org/abs/1707.01068). (Introduces the Coin Game, out of scope here — see paper's Sec. 5.2.)
+- Foerster, J., Farquhar, G., Al-Shedivat, M., Rocktäschel, T., Xing, E., & Whiteson, S. (2018). [DiCE: The Infinitely Differentiable Monte Carlo Estimator](https://arxiv.org/abs/1802.05098). ICML 2018. (The separate follow-up paper this repo's LOLA-PG module explicitly does not implement — see `foerster2018/policy_gradient/lola_pg.py`'s module docstring.)
