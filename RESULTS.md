@@ -1,11 +1,12 @@
 # Results
 
-**Status (2026-09-09): initial build complete. 19/19 unit tests passing. All
-three experiment scripts run end-to-end at the scale reported below (50
-seeds for the exact-gradient experiments, 5 seeds for the noisier
-policy-gradient one). This file records what was actually run and found,
-including one real bug caught during development, not a claim of a
-finished, paper-scale replication.**
+**Status (2026-09-09): initial build complete, one post-build fix
+(Section 2b). 19/19 unit tests passing. All three experiment scripts run
+end-to-end at the scale reported below (50 seeds for the exact-gradient
+experiments, 20 seeds for the noisier policy-gradient one). This file
+records what was actually run and found, including two real bugs caught
+during development/review, not a claim of a finished, paper-scale
+replication.**
 
 ## 1. The exact-LOLA second-order term — verified correct, then independently reviewed
 
@@ -129,6 +130,50 @@ earlier using the same default model, so this looks like a transient
 service-side gap rather than a permanent account restriction — worth
 re-attempting in a future session, not silently skipped here.
 
+## 2b. The deferred policy-gradient review, completed 2026-09-09 — one real bug found, one bias documented
+
+The service-side gap in Section 2 wasn't a permanent restriction: this
+account's Codex CLI default model rotated to `gpt-5.6-sol` (reasoning
+effort `low`) after Section 1/2 were written, and `gpt-5.5` was retired.
+Re-running the same review against `foerster2018/policy_gradient/` with
+`-m gpt-5.6-sol -c model_reasoning_effort="low"` completed successfully
+and found two real issues, both verified by direct code inspection before
+acting on them (not accepted on Codex's word alone):
+
+**A real, if small, estimator bug**: `_reinforce_grad`'s baseline was
+`reward_to_go.mean(dim=1, keepdim=True)` — the batch mean *including* each
+trajectory's own reward-to-go in its own baseline. This is not a valid
+REINFORCE baseline: `E[S_i . (R_i - mean(R))] = (1 - 1/B) . E[S_i R_i]`, a
+`(B-1)/B` shrinkage of the true gradient, exactly zero at `batch_size=1`.
+At this repo's actual batch sizes (1024-8000) the shrinkage is under 0.1%
+— invisible against the reported sampling noise in every table below —
+but it's a free fix: switched to a leave-one-out baseline (each
+trajectory's baseline excludes its own reward-to-go). `pytest tests/ -q`
+still passes 19/19 after the change.
+
+**A documented, not fixed, estimator bias**: `lola_pg_update` computes
+both factors of the Eq. 4.7 product — the Eq. 4.6 cross matrix and
+`grad_theta2 R^1` — from the *same* rollout batch. `E[XY] != E[X]E[Y]` for
+two same-batch-correlated estimates, so the product is a biased estimate
+of the intended product-of-expectations even though each factor is
+individually unbiased. The correct fix (independent batches per factor)
+doubles rollout cost per update and would invalidate every PG number below
+without re-running them, so it's documented in `lola_pg.py`'s module
+docstring instead of applied here.
+
+**Re-ran `run_experiment2_ipd_policy_gradient.py` after the baseline fix**,
+first at the original `--num-runs 5` (matching the old table almost
+exactly on NL-NL/LOLA-LOLA but showing a *materially different* mixed-
+pairing result than the pre-fix run — partial escape from defection
+instead of total collapse), then at `--num-runs 20` for a less noise-prone
+read given how much the 5-seed mixed-pairing numbers moved. The Section
+3c table below is the 20-seed, post-fix version; see that section for the
+updated numbers and revised interpretation. This is a real example of a
+small estimator bug mattering for exactly the noisiest, most marginal
+result in the repo (the mixed pairing) while being invisible everywhere
+else — worth remembering before trusting a "no effect" conclusion drawn
+from a biased estimator, even when the bias looks numerically tiny.
+
 ## 3. Real numbers from actual runs
 
 ### 3a. IPD, exact gradients (`run_experiment1_ipd_exact.py --num-runs 50 --iterations 600`)
@@ -215,7 +260,7 @@ stays completely still. A single LOLA agent (LOLA-NL / NL-LOLA) is also
 enough to pull the pair much closer to Nash than NL-NL manages, though
 not quite as tightly as LOLA-LOLA.
 
-### 3c. IPD, policy gradient (`run_experiment2_ipd_policy_gradient.py --num-runs 5 --iterations 300 --batch-size 1024`)
+### 3c. IPD, policy gradient (`run_experiment2_ipd_policy_gradient.py --num-runs 20 --iterations 300 --batch-size 1024`, post leave-one-out-baseline fix, Section 2b)
 
 `gamma=0.96`, `delta=eta=0.3`, `horizon=100`. A smaller hyperparameter
 sweep (`--num-runs 3`, `--iterations 150`) after fixing the gamma^t bug
@@ -226,25 +271,33 @@ all), and delta>=0.5 didn't obviously improve on 0.3.
 
 | pairing | agent | mean reward/step (std) | %TFT-like |
 |---|---|---|---|
-| NL vs NL | both | -1.999 | 0% |
-| LOLA vs NL | both | -1.999 | 0% |
-| NL vs LOLA | both | -1.800 (0.398) | 20% |
-| LOLA vs LOLA | agent1 | -1.234 (0.383) | 40% |
-| LOLA vs LOLA | agent2 | -1.260 (0.382) | 60% |
+| NL vs NL | both | -1.999 (~0) | 0% |
+| LOLA vs NL | LOLA | -1.875 (0.309) | 5% |
+| LOLA vs NL | NL | -1.877 (0.307) | 15% |
+| NL vs LOLA | NL | -1.770 (0.362) | 30% |
+| NL vs LOLA | LOLA | -1.566 (0.501) | 15% |
+| LOLA vs LOLA | agent1 | -1.283 (0.352) | 50% |
+| LOLA vs LOLA | agent2 | -1.250 (0.352) | 35% |
 
 Paper's Table 3: NL-PG %TFT=20.0, R=-1.98(0.00); LOLA-PG %TFT=66.4,
-R=-1.17(0.34). NL-NL and LOLA-LOLA both land close to the paper's own
-numbers (LOLA-LOLA's std, 0.38, is close to the paper's 0.34). The mixed
-`LOLA vs NL` / `NL vs LOLA` pairings, however, behave inconsistently
-across the 5 seeds tried (one pairing collapsed to defection in all 5
-seeds, the mirror-labeled pairing partially escaped in 1 of 5) — a real,
-reported non-reproduction of the exact-gradient version's clean
-asymmetric-exploitation result, discussed in README's "Known gaps".
-Since the paper's own Table 3 only reports the two symmetric self-play
-settings for the PG experiment, this specific gap isn't a contradiction
-of a specific published number, but it's still an honest limitation of
-this repo's own (simpler, batch-mean-baseline, un-tuned-per-pairing)
-implementation.
+R=-1.17(0.34). NL-NL and LOLA-LOLA both still land close to the paper's
+own numbers. The mixed pairings changed materially after the Section 2b
+baseline fix — the pre-fix 5-seed run showed one pairing collapsing to
+defection in all 5 seeds and the other escaping in only 1 of 5; this
+post-fix, 20-seed run shows both pairings partially escaping defection in
+a consistent minority of seeds (5-30% TFT-like, means around -1.6 to
+-1.9) rather than the exact-gradient version's clean, majority-of-seeds
+asymmetric exploitation (Section 3a: -0.74/-1.94, 0%/100% TFT-like). This
+is still a real, honest non-reproduction of the exact-gradient result's
+strength and consistency — not fixed by the baseline correction, just
+measured less noisily. Since the paper's own Table 3 only reports the two
+symmetric self-play settings for the PG experiment, this specific gap
+isn't a contradiction of a specific published number. Contributing
+factors, none isolated as *the* cause: the still-simpler batch-mean-style
+baseline (leave-one-out fixes the shrinkage bias but is still not a
+learned critic), the same-batch covariance bias in the LOLA cross term
+(Section 2b), and step sizes tuned for the symmetric pairings rather than
+per-pairing.
 
 ## 4. Scope corners cut
 

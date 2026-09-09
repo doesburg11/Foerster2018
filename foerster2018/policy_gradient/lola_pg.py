@@ -49,6 +49,19 @@ drops necessary terms unless it is built the way DiCE builds it; that
 subtlety is exactly why this module computes Eq. 4.5-4.7 as explicit
 tensor arithmetic over the rollout's per-step scores instead of
 autograd-through-a-surrogate-loss.
+
+Known finite-sample estimator bias, flagged by independent Codex review
+(2026-09-09), not fixed here: `lola_pg_update` computes both factors of
+Eq. 4.7's product -- the cross matrix (Eq. 4.6) and `grad_{theta2} R^1` --
+from the *same* rollout batch. Since `E[XY] != E[X]E[Y]` for two estimates
+correlated through a shared batch, the product is a biased estimate of
+the product of expectations even though each factor is individually an
+unbiased (up to the leave-one-out note above) estimate of its own
+quantity. Sampling two independent batches, one per factor, would remove
+this covariance term. Not done here: it doubles the rollout cost of every
+LOLA-PG update and none of this repo's reported numbers were regenerated
+against it, so changing it now would silently invalidate the "Known gaps"
+numbers in the top-level README without re-running them.
 """
 import torch
 
@@ -85,13 +98,28 @@ def _reinforce_grad(scores: torch.Tensor, rewards: torch.Tensor, gamma: float) -
     (see `tests/test_policy_gradient.py::
     test_reinforce_grad_matches_exact_gradient_at_uniform_policy`).
 
-    `scores`: (T, B, P). `rewards`: (T, B). A per-timestep batch-mean
+    `scores`: (T, B, P). `rewards`: (T, B). A per-timestep leave-one-out
     baseline is subtracted for variance reduction (the "value baseline"
-    named in this repo's brief).
+    named in this repo's brief): each trajectory's baseline is the batch
+    mean of every *other* trajectory's reward-to-go, excluding its own.
+
+    An earlier version used the plain batch mean (including the current
+    trajectory in its own baseline), which is not a valid REINFORCE
+    baseline: `E[S_i . (R_i - mean(R))] = (1 - 1/B) . E[S_i R_i]`, a
+    `(B-1)/B` shrinkage of the true gradient that is exactly zero at
+    `batch_size=1`. Caught by independent Codex review (2026-09-09); at
+    this repo's actual batch sizes (1024-8000) the effect was under 0.1%,
+    invisible against reported sampling noise, but leave-one-out removes it
+    for free.
     """
     horizon = rewards.shape[0]
+    batch_size = rewards.shape[1]
     reward_to_go = _reward_to_go(rewards, gamma)  # (T, B), R_t(tau)
-    baseline = reward_to_go.mean(dim=1, keepdim=True)  # (T, 1)
+    if batch_size > 1:
+        total = reward_to_go.sum(dim=1, keepdim=True)  # (T, 1)
+        baseline = (total - reward_to_go) / (batch_size - 1)  # (T, B), leave-one-out
+    else:
+        baseline = torch.zeros_like(reward_to_go)
     advantage = reward_to_go - baseline  # (T, B)
     gamma_powers = gamma ** torch.arange(horizon, dtype=rewards.dtype)  # (T,), gamma^t
     weighted = scores * (gamma_powers.view(horizon, 1) * advantage).unsqueeze(-1)  # (T, B, P)
