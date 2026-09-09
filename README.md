@@ -16,7 +16,7 @@ The paper's question: in multi-agent reinforcement learning, each agent's enviro
 
 ### Games: memory-one iterated matrix games (Sec. 5.1)
 
-Foerster et al. model an iterated matrix game as a two-agent Markov Reward Process: "the state at time 0 is empty, denoted as s0, and at time t >= 1 is the joint action from t-1: s_t = (u1_{t-1}, u2_{t-1})." Because a memory-1 strategy loses no generality against a memory-1 opponent (Press & Dyson 2012, cited by the paper), each agent's policy is "fully specified by 5 probabilities": the probability of playing its first action (Cooperate for IPD, Heads for IMP) at the start state s0, and in each of the four states CC, CD, DC, DD. Each probability is a sigmoid-squashed scalar logit (`foerster2018/policy.py::MemoryOnePolicy`).
+Foerster et al. model an iterated matrix game as a two-agent Markov Reward Process: "the state at time 0 is empty, denoted as $s_0$, and at time $t \geq 1$ is the joint action from $t-1$: $s_t = (u^1_{t-1}, u^2_{t-1})$." Because a memory-1 strategy loses no generality against a memory-1 opponent (Press & Dyson 2012, cited by the paper), each agent's policy is "fully specified by 5 probabilities": the probability of playing its first action (Cooperate for IPD, Heads for IMP) at the start state $s_0$, and in each of the four states CC, CD, DC, DD. Each probability is a sigmoid-squashed scalar logit (`foerster2018/policy.py::MemoryOnePolicy`).
 
 The payoff matrices used are the paper's own Table 1 (IPD) and Table 2 (IMP), transcribed exactly in `foerster2018/games/matrix_game.py`:
 
