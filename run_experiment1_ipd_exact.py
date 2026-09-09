@@ -118,19 +118,25 @@ def main():
     parser.add_argument(
         "--delta",
         type=float,
-        default=0.3,
+        default=0.5,
         help=(
-            "Step size for the first-order (own-gradient) term. The paper "
-            "does not state a step size for the exact-gradient experiment "
-            "(only for the policy-gradient one, Sec. 5.3: 0.005). 0.3 was "
-            "chosen empirically in this repo: delta=1.0 overshoots into a "
-            "spurious full-cooperation fixed point even for NL-vs-LOLA "
-            "pairings within a few hundred iterations, while delta<=0.1 is "
-            "too slow to escape the mutual-defection basin in a few hundred "
-            "iterations. See README's 'What's matched vs. simplified'."
+            "Step size for the first-order (own-gradient) term. The paper's "
+            "main text doesn't state a step size for Table 3's NL-Ex/LOLA-Ex "
+            "self-play numbers, but its Table 4 caption states one directly "
+            "for the closely-related asymmetric-exploitability experiment on "
+            "the same IPD environment: 'These experiments were carried out "
+            "with a delta of 0.5.' Used here as the best-evidenced value "
+            "available, in place of an earlier, purely empirical choice of "
+            "0.3. Cross-checked against github.com/alshedivat/lola (the "
+            "paper's own released code, not used as a dependency): its "
+            "train_exact.py CLI defaults to delta=1.0, which this repo "
+            "found overshoots into a spurious full-cooperation fixed point "
+            "for the asymmetric pairing (see README's 'What's matched vs. "
+            "simplified' and RESULTS.md) -- i.e. the code's own CLI default "
+            "is a worse match to Table 4 than Table 4's own stated 0.5."
         ),
     )
-    parser.add_argument("--eta", type=float, default=0.3, help="Step size for the LOLA correction term.")
+    parser.add_argument("--eta", type=float, default=0.5, help="Step size for the LOLA correction term.")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--output-dir", type=str, default="output/run_experiment1_ipd_exact")
     args = parser.parse_args()

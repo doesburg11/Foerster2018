@@ -1,12 +1,89 @@
 # Results
 
-**Status (2026-09-09): initial build complete, one post-build fix
-(Section 2b). 19/19 unit tests passing. All three experiment scripts run
-end-to-end at the scale reported below (50 seeds for the exact-gradient
-experiments, 20 seeds for the noisier policy-gradient one). This file
-records what was actually run and found, including two real bugs caught
-during development/review, not a claim of a finished, paper-scale
-replication.**
+**Status (2026-09-09): initial build complete, two post-build corrections
+(Sections 2b and 2c). 19/19 unit tests passing. All three experiment
+scripts run end-to-end at the scale reported below (50 seeds for the
+exact-gradient experiments, 20 seeds for the noisier policy-gradient one).
+This file records what was actually run and found, including two real
+bugs and one hyperparameter correction caught during
+development/review, not a claim of a finished, paper-scale replication.**
+
+## 2c. Found the paper's actual authors' code, cross-checked hyperparameters and formula against it, corrected the IPD exact-gradient step size
+
+The user found and pointed to the paper's own released code,
+[github.com/alshedivat/lola](https://github.com/alshedivat/lola) (cloned
+read-only to a scratch directory for reference; never imported or used as
+a dependency — this repo's `foerster2018/exact/lola.py` is still its own
+independent implementation, built before this cross-check happened).
+Three things were checked against it:
+
+1. **The second-order correction's construction.** `alshedivat/lola` has
+   *two* independent implementations of the same LOLA update:
+   `train_exact.py::corrections_func` (used by `scripts/run_lola.py`) and
+   `tournament.py::ExactLOLA._build_update` (used by the round-robin
+   tournament). Both build the correction the same way this repo's
+   `lola_correction()` does: a first-order cross-gradient
+   (`grad_theta2 V1`) held constant via `tf.stop_gradient` (this repo's
+   `.detach()`), dotted against the opponent's own naive gradient
+   (`grad_theta2 V2`), then differentiated once more with respect to
+   theta1. Two independently-written reference implementations agreeing
+   with this repo's own construction is a stronger correctness signal
+   than the earlier Codex review alone (Section 1) — it rules out this
+   repo having converged on a formula that merely *passes its own tests*
+   but differs from the paper's actual intended construction.
+
+2. **Hyperparameters used by the released code.** `train_exact.py`'s CLI
+   (`scripts/run_lola.py`) defaults to `gamma=0.96` for IPD and `gamma=0.9`
+   for IMP (both already matched here) and `lr=1.0`, `lr_correction=1`
+   (via the CLI's own default, though the function signature's own
+   default is `lr_correction=0.5`) for the exact-gradient IPD/IMP
+   experiment — i.e. `delta=eta=1.0` in this repo's notation. This repo
+   tested that exact configuration directly
+   (`run_experiment1_ipd_exact.py --delta 1.0 --eta 1.0 --iterations 200`,
+   matching the CLI's `trace_length=200`) and found the asymmetric
+   LOLA-vs-NL pairing collapses into a spurious, near-exact mutual
+   cooperation fixed point for *both* agents (`-1.001/-1.001` at 50
+   seeds, std ~0.001) rather than any asymmetric exploitation at all —
+   this matches an earlier, independent finding from this repo's own
+   `delta=1.0` sweep (Section 3a's original text, before this section),
+   which called that same fixed point an "overshoot artifact." So the
+   released code's own CLI default is *not* usable as a well-evidenced
+   step size for the asymmetric pairing.
+
+3. **The actual paper text**, fetched directly (the arXiv PDF, not a
+   secondhand summary) to check Table 3, Table 4, and Section 5.3
+   verbatim. Table 3 (IPD/IMP self-play, NL-Ex/LOLA-Ex/NL-PG/LOLA-PG) and
+   Section 5.3's stated `delta=0.005`/critic-`1`/`batch_size=4000` for the
+   *policy-gradient* experiment were already correctly transcribed in this
+   repo's existing docs — confirmed, no changes needed there. But directly
+   below Table 4 (the higher-order-LOLA/exploitability table, IPD only),
+   the paper states outright: **"These experiments were carried out with
+   a delta of 0.5."** This is a real, previously-missed piece of
+   information: this repo's original `delta=eta=0.3` (Section 3a's
+   original sweep, chosen empirically because *Table 3's own* self-play
+   numbers don't state a step size) was a reasonable guess given what had
+   been checked at the time, but Table 4 does state one, for the
+   directly-relevant asymmetric-pairing experiment in the same
+   environment, and it was missed on the first read of the paper during
+   this repo's initial build.
+
+**Action taken**: switched the exact-gradient IPD experiment's default
+`delta`/`eta` from `0.3` to `0.5` (`run_experiment1_ipd_exact.py`), and
+re-ran at `--num-runs 50 --iterations 2000` (2000 chosen because this
+repo's own dynamics at `delta=0.5` hadn't fully settled by 600 iterations,
+the previous default — the paper doesn't state an iteration count for
+this table, but Figure 1's x-axis appears to run to several thousand).
+Result: **the asymmetric LOLA-vs-NL pairing moved much closer to Table
+4's own `(-1.54, -1.28)` (NL, LOLA), though it did not land on it
+exactly** — see Section 3a below for the full before/after numbers.
+Interestingly, the new gap is smaller-than-paper rather than the old
+gap's bigger-than-paper (this repo's LOLA agent now exploits NL *less*
+than Table 4 reports, where the old `delta=0.3` config had it exploiting
+NL *more*) — using the confirmed step size closed roughly half the
+remaining distance to Table 4's numbers rather than eliminating it,
+which is the honest result to report rather than a fully resolved
+match. `pytest tests/ -q` still passes 19/19 (no test depended on the old
+default).
 
 ## 1. The exact-LOLA second-order term — verified correct, then independently reviewed
 
@@ -176,12 +253,16 @@ from a biased estimator, even when the bias looks numerically tiny.
 
 ## 3. Real numbers from actual runs
 
-### 3a. IPD, exact gradients (`run_experiment1_ipd_exact.py --num-runs 50 --iterations 600`)
+### 3a. IPD, exact gradients (`run_experiment1_ipd_exact.py --num-runs 50 --iterations 2000`, delta=eta=0.5)
 
-Step sizes `delta = eta = 0.3` were chosen empirically — the paper's main
-text states a step size only for the policy-gradient actor (0.005), not
-for this exact-gradient experiment. A sweep (`gamma=0.96`, 20 seeds/cell)
-motivated the choice:
+`delta=eta=0.5` is not a guess: the paper's Table 4 caption states
+directly, "these experiments were carried out with a delta of 0.5" — see
+Section 2c above for how this was found (via the user pointing at the
+paper's own released code, which led to re-reading the paper's Table 4
+text directly) and what it replaced. The original empirical sweep that
+produced this repo's first choice (`delta=0.3`) is kept below for
+context, since it's still the actual history of how this repo arrived at
+a reasonable-looking number before the real one was found:
 
 | delta=eta | NL-NL | LOLA-NL | LOLA-LOLA |
 |---|---|---|---|
@@ -192,39 +273,50 @@ motivated the choice:
 `delta=1.0`'s LOLA-vs-NL collapsing to *mutual* cooperation (both getting
 ~-1.0, as if NL had also become a reciprocating partner) is not a
 plausible outcome for a truly naive learner and was the tell that the
-step size was oversized — an overshoot artifact, not a real result. `0.3`
-is the smallest step size tested that clearly separates from both
-extremes within a few hundred iterations. See README's "What's matched
-vs. simplified" for the full caveat.
+step size was oversized — an overshoot artifact, not a real result; this
+was independently confirmed in Section 2c by testing the released code's
+own CLI default (which is also `delta=eta=1.0`) and finding the exact
+same collapse.
 
-Full 50-seed, 600-iteration results (this repo's own scripts, real run,
-not hypothetical):
+Full 50-seed, 2000-iteration results at the paper's own `delta=eta=0.5`
+(this repo's own scripts, real run, not hypothetical):
 
 | pairing | agent | mean reward/step (std) | %TFT-like |
 |---|---|---|---|
-| NL vs NL | agent1 | -1.999 (3.3e-6) | 0% |
-| NL vs NL | agent2 | -1.999 (3.1e-6) | 0% |
-| LOLA vs NL | LOLA | -0.736 (0.071) | 0% |
-| LOLA vs NL | NL | -1.940 (0.159) | 100% |
-| NL vs LOLA | NL | -1.958 (0.125) | 100% |
-| NL vs LOLA | LOLA | -0.727 (0.059) | 0% |
-| LOLA vs LOLA | agent1 | -1.130 (0.149) | 56% |
-| LOLA vs LOLA | agent2 | -1.122 (0.142) | 50% |
+| NL vs NL | both | -2.000 (~0) | 0% |
+| LOLA vs NL | LOLA | -0.941 (0.207) | 74% |
+| LOLA vs NL | NL | -1.260 (0.438) | 92% |
+| NL vs LOLA | NL | -1.174 (0.358) | 76% |
+| NL vs LOLA | LOLA | -0.973 (0.183) | 76% |
+| LOLA vs LOLA | agent1 | -1.150 (0.145) | 74% |
+| LOLA vs LOLA | agent2 | -1.118 (0.134) | 48% |
 
 Paper's Table 3: NL-Ex %TFT=20.8, R=-1.98(0.14); LOLA-Ex %TFT=81.0,
-R=-1.06(0.19). Paper's Table 4 (the only published asymmetric-pairing
-numbers): NL-Ex-vs-LOLA-Ex = (-1.54, -1.28). See README for the
-discussion of where these differ and the leading hypotheses why
-(different, unstated step sizes and/or initialization being the most
-likely).
+R=-1.06(0.19). Paper's Table 4 (delta=0.5, same value used here):
+NL-Ex-vs-LOLA-Ex = (-1.54, -1.28). NL-NL and LOLA-LOLA mean rewards
+remain close to both tables' numbers. The asymmetric pairing is now
+`(-0.94 to -0.97, -1.17 to -1.26)` (LOLA, NL) versus the paper's
+`(-1.28, -1.54)` — same direction (LOLA exploits NL), but this repo's
+effect size is now *smaller* than the paper's, the mirror-image miss from
+the old `delta=0.3` config (which was *bigger* than the paper's). Using
+the confirmed step size closed roughly half the gap rather than
+eliminating it; the remainder is most likely the iteration count (not
+stated by the paper for this table) and/or genuine seed variability at
+n=50, neither isolated further. `%TFT-like` also moved closer to the
+paper's numbers as a side effect (LOLA-LOLA now 48-74% vs. the paper's
+81%, up from the old config's 50-56%) — except NL-NL, still 0% here
+against the paper's 20.8%, with this repo's NL-NL seeds all converging to
+essentially the same defection point (std ~0) unlike the paper's own
+reported spread (0.14) — a real, unresolved difference, most likely
+initialization distribution, not investigated further.
 
 The `%TFT-like` numbers above also surface a real limitation of this
 repo's own classification heuristic worth naming here directly: in the
-`LOLA vs NL` row, the *exploited* NL agent is classified 100% "TFT-like"
+`LOLA vs NL` row, the *exploited* NL agent is classified 92% "TFT-like"
 (it ends up cooperating a lot, satisfying the heuristic's `P(C|s0)>0.5,
-P(C|CC)>0.5, P(C|DD)<0.5` check) while the LOLA agent exploiting it is
-classified 0% (it's deliberately partially defecting to extract more than
-the mutual-cooperation payoff, which correctly fails the heuristic).
+P(C|CC)>0.5, P(C|DD)<0.5` check) at a similar rate to the LOLA agent
+exploiting it (74%) — despite one of them being deliberately shaped into
+cooperating more than the other purely for the exploiter's own benefit.
 `is_tft_like()` is not a fairness- or reciprocity-aware TFT detector — it
 would call a purely exploited "always cooperate"-leaning policy
 "TFT-like" even though it isn't reciprocating anything, since it never
