@@ -136,7 +136,7 @@ Per this project's standing practice, `codex exec` (OpenAI Codex CLI) independen
 
 > No correctness bug found in `foerster2018/exact/`: the LOLA term does differentiate through the opponent's gradient step. It does not silently collapse to a first-order/naive update... The detach is deliberate and only removes the paper-dropped extra term involving `d/dtheta1(dV1/dtheta2)`... I also ran a direct probe: the implemented correction matched an independent Hessian-vector-product construction exactly at the tested point (`max_abs_impl_minus_manual = 0.0`).
 
-A second, supplementary Codex review was attempted on `foerster2018/policy_gradient/`, the review completed and found two real issues in `foerster2018/policy_gradient/lola_pg.py`:
+A second, supplementary Codex review of `foerster2018/policy_gradient/` found two real issues in `foerster2018/policy_gradient/lola_pg.py`:
 
 > The empirical baseline makes the REINFORCE estimator biased for finite batches... `baseline = reward_to_go.mean(dim=1, keepdim=True)` [includes] the same trajectory whose score is multiplied by it... `E[S_i(R_i-bar R)]` has expectation `(1-1/B) E[S_i R_i]`... Thus `batch_size=1` always produces an exactly zero gradient, and all finite-batch estimates are shrunk by `(B-1)/B`.
 >
