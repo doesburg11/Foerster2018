@@ -325,6 +325,98 @@ actually observes retaliation. Read the raw final policy vectors in
 fields, not just this summary percentage, before drawing conclusions from
 it.
 
+**Reward curves for one example run per pairing** (seed 0, the first of
+the 50 seeds summarized in the table above — not the 50-seed aggregate
+itself), generated automatically by `run_experiment1_ipd_exact.py`
+alongside `results.json`:
+
+![Reward curves for NL-NL, LOLA-NL, NL-LOLA, and LOLA-LOLA over 2000 iterations](assets/reward_curves_ipd_exact.png)
+
+Each panel plots normalised reward-per-step, `(1-gamma)*V`, over all 2000
+training iterations for both agents in that pairing:
+
+- **NL-NL**: both curves collapse together to exactly -2.0 within ~50
+  iterations and stay flat for the rest of training — matches the table's
+  std of ~0 exactly, since every one of the 50 seeds converges to the
+  identical defection point.
+- **LOLA-NL**: large early oscillations (iterations 0-300), settling into
+  a plateau around -0.85 (LOLA) / -1.55 (NL) — then around iteration
+  ~1300, a second regime shift: LOLA drifts up toward -0.65 while NL
+  starts oscillating with growing amplitude down toward -2.0. This is
+  exactly why this pairing's aggregate std is so large (0.207 LOLA, 0.438
+  NL, in the table above) — this one seed visibly hasn't fully settled
+  even after 2000 iterations.
+- **NL-LOLA** (the mirrored roles — same hyperparameters, and even the
+  same initial random draw as LOLA-NL, just relabeled): settles cleanly
+  by ~iteration 200 into a stable plateau near -1.0 for both, with no
+  later disruption. That the two mirrored pairings behave so differently
+  from matched initial conditions is a real asymmetry in the dynamics,
+  not a randomness artifact — one more concrete reason the asymmetric-
+  pairing gap to the paper's own Table 4 numbers, discussed above, wasn't
+  isolated further.
+- **LOLA-LOLA**: oscillates early, settles by ~iteration 500 to roughly
+  -1.25 (agent1) / -1.0 (agent2), a small dip around iteration ~1500,
+  then restabilizes — the best-behaved of the three non-trivial pairings,
+  consistent with it being the closest of the three to the paper's own
+  reported numbers.
+
+Takeaway: NL-NL is a clean, deterministic collapse; any pairing involving
+LOLA takes longer to settle, oscillates more, and — as the LOLA-NL vs.
+NL-LOLA contrast shows — can behave qualitatively differently even from
+matched initial conditions. That's the same run-to-run instability this
+section's std values already imply, made directly visible here rather
+than only inferred from a summary statistic.
+
+**Policy-space phase portrait, same example run per pairing** — agent1's
+vs. agent2's $P(C \mid s_0)$ (the opening-move probability only, *not* the
+full 5-probability policy — see the caveat below) over the same 2000
+iterations, circle marking the start and star the end:
+
+![Opening-move phase portrait for NL-NL, LOLA-NL, NL-LOLA, and LOLA-LOLA over 2000 iterations](assets/phase_portrait_ipd_exact.png)
+
+All four pairings start from essentially the same point, the open circle
+near `(0.49, 0.50)` — expected, since every run initializes `theta ~
+U(-0.1, 0.1)`, which maps through the sigmoid to roughly 0.5 regardless of
+pairing:
+
+- **NL-NL** (red): a straight line from that shared start down to `(0, 0)`
+  — both agents' opening move collapses monotonically toward Defect, with
+  no detours, matching the clean std~0 collapse in the reward curves above.
+- **LOLA-NL** (orange): a much less direct path — moves left while
+  climbing, loops briefly near the top, and settles near `(0.02, 0.99)`,
+  i.e. LOLA ends up opening with Defect while NL ends up opening with
+  Cooperate. Read this alongside the reward table, not instead of it: LOLA
+  is the one getting the better reward here (-0.94 vs. NL's -1.26) despite
+  (or rather, via) training NL into opening cooperatively — a visual
+  reminder of why `is_tft_like()`'s 92%-for-the-exploited-agent number
+  above is misleading taken alone.
+- **NL-LOLA** (blue): the mirror pairing, same starting point, diverges
+  almost immediately from LOLA-NL's path — a dip down to `(0.6, 0.13)`
+  before a late, sharp jump up to `(0.99, 1.0)`. Same relabeling-only
+  difference as in the reward curves above, same conclusion: matched
+  initial conditions, genuinely different trajectory.
+- **LOLA-LOLA** (green): climbs toward high mutual cooperation (up to
+  roughly `(0.9, 0.85)`), wobbles there — the same wobble visible as the
+  iteration-~1500 dip in the reward curves above — and then *reverses
+  sharply* in the final stretch, ending at `(0.98, 0.03)`: agent1 opening
+  cooperatively, agent2 not. This is not the "both open C" outcome the
+  climb toward the corner might suggest, and it's a genuinely useful thing
+  for this chart to have caught: the aggregate table's `%TFT-like` for this
+  pairing is 74% (agent1) vs. only 48% (agent2) — this single example run
+  landed on the weaker, less-cooperative side of that split, not the
+  strong-cooperation story the mean reward alone (-1.15/-1.12, both far
+  better than mutual defection) might imply.
+
+**Caveat, worth repeating from the module's own plotting code**: $P(C|s_0)$
+is the opening-move probability only. A trajectory near the `(1, 1)`
+corner can still defect after the opening move (or vice versa near
+`(0, 0)`) — what actually drives the reward numbers is the full 5-probability
+policy (`P(C|s_0)`, `P(C|CC)`, `P(C|CD)`, `P(C|DC)`, `P(C|DD)`), which is
+what `is_tft_like()` and the mean-reward table above are actually
+checking. This chart shows one legible slice of the dynamics, not a
+substitute for those numbers — several of the bullets above only make
+sense read together with the reward table, not from the picture alone.
+
 ### 3b. IMP, exact gradients (`run_experiment3_imp.py --num-runs 50 --iterations 400`)
 
 `gamma=0.9`, `delta=eta=1.0` (this one worked well straight off the
